@@ -115,6 +115,12 @@ resource "aws_security_group" "servers_sg" {
     protocol        = "tcp"
     security_groups = [aws_security_group.alb_sg.id]
   }
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     from_port   = 0
@@ -124,6 +130,26 @@ resource "aws_security_group" "servers_sg" {
   }
 }
 
+
+
+resource "aws_security_group" "bastion_sg" {
+  vpc_id = aws_vpc.bgene_vpc.id
+  name   = "bastion"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
 resource "aws_security_group" "rds_sg" {
   vpc_id = aws_vpc.bgene_vpc.id
   name   = "rds_sg"
@@ -143,6 +169,18 @@ resource "aws_security_group" "rds_sg" {
   }
 }
 
+resource "aws_instance" "web" {
+  subnet_id       = aws_subnet.public[0].id
+  ami             = "ami-04b4f1a9cf54c11d0"
+  instance_type   = "t3.micro"
+  key_name        = "bostongene"
+  security_groups = [aws_security_group.bastion_sg.id]
+
+  tags = {
+    Name = "bastion"
+  }
+}
+
 
 resource "aws_ecs_cluster" "ecs_cluster" {
   name = "bgene_cluster"
@@ -150,7 +188,7 @@ resource "aws_ecs_cluster" "ecs_cluster" {
 
 resource "aws_ecs_task_definition" "ecs_task" {
   family                   = "web-task"
-  network_mode             = "bridge"
+  network_mode             = "awsvpc"
   requires_compatibilities = ["EC2"]
   cpu                      = "256"
   memory                   = "512"
@@ -217,17 +255,17 @@ resource "aws_alb_listener" "http" {
 }
 
 resource "aws_launch_template" "ecs_lt" {
-  name                   = "ecs-launch-template"
-  image_id               = data.aws_ami.ecs_optimized.id
-  instance_type          = "t3.micro"
-  vpc_security_group_ids = [aws_security_group.servers_sg.id]
-  key_name               = "bostongene"
+  name          = "ecs-launch-template"
+  image_id      = data.aws_ami.ecs_optimized.id
+  instance_type = "t3.micro"
+  key_name      = "bostongene"
   iam_instance_profile {
     name = aws_iam_instance_profile.ecs_instance_profile.name #maybe will be needed to adjust by reference 
   }
   network_interfaces {
     associate_public_ip_address = false
     security_groups             = [aws_security_group.servers_sg.id]
+
   }
 
   tag_specifications {
@@ -237,7 +275,12 @@ resource "aws_launch_template" "ecs_lt" {
     }
   }
 
-  user_data = filebase64("user_data.sh")
+  user_data = base64encode(<<EOF
+#!/bin/bash
+echo ECS_CLUSTER=${aws_ecs_cluster.ecs_cluster.name} >> /etc/ecs/ecs.config
+systemctl enable --now ecs
+EOF
+  )
   lifecycle {
     create_before_destroy = true
   }
