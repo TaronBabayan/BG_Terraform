@@ -212,7 +212,7 @@ resource "aws_ecs_service" "ecs_service" {
   name            = "web-service"
   cluster         = aws_ecs_cluster.ecs_cluster.id
   task_definition = aws_ecs_task_definition.ecs_task.arn
-  desired_count   = 2
+  desired_count   = 3
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.ecs_cp.name
