@@ -20,10 +20,10 @@ resource "aws_subnet" "public" {
 }
 
 resource "aws_subnet" "private" {
-  count             = 2
+  count             = 5
   vpc_id            = aws_vpc.bgene_vpc.id
   cidr_block        = cidrsubnet(aws_vpc.bgene_vpc.cidr_block, 8, count.index + 2)
-  availability_zone = element(data.aws_availability_zones.available.names, count.index)
+  availability_zone = element(data.aws_availability_zones.available.names, count.index % 2)
   tags = {
     Name = "private-subnet-${count.index}"
   }
@@ -81,7 +81,7 @@ resource "aws_route_table" "private" {
 }
 
 resource "aws_route_table_association" "private" {
-  count          = 2
+  count          = 5
   subnet_id      = aws_subnet.private[count.index].id
   route_table_id = aws_route_table.private.id
 }
@@ -175,6 +175,9 @@ resource "aws_instance" "web" {
   instance_type   = "t3.micro"
   key_name        = "bostongene"
   security_groups = [aws_security_group.bastion_sg.id]
+  lifecycle {
+    prevent_destroy = true
+  }
 
   tags = {
     Name = "bastion"
@@ -210,10 +213,14 @@ resource "aws_ecs_service" "ecs_service" {
   cluster         = aws_ecs_cluster.ecs_cluster.id
   task_definition = aws_ecs_task_definition.ecs_task.arn
   desired_count   = 2
-  launch_type     = "EC2"
+
+  capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.ecs_cp.name
+    weight            = 100
+  }
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = slice(aws_subnet.private[*].id, 0, 3) # Use first 3 private subnets for ECS
     security_groups  = [aws_security_group.servers_sg.id]
     assign_public_ip = false
   }
@@ -224,7 +231,7 @@ resource "aws_ecs_service" "ecs_service" {
     container_port   = 80
   }
 
-  depends_on = [aws_alb_listener.http, aws_autoscaling_group.ecs_asg] # Add depends_on
+  depends_on = [aws_alb_listener.http, aws_autoscaling_group.ecs_asg, aws_nat_gateway.nat] # Add depends_on
 }
 
 resource "aws_alb" "ecs_alb" {
@@ -232,7 +239,7 @@ resource "aws_alb" "ecs_alb" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb_sg.id]
-  subnets            = aws_subnet.public[*].id
+  subnets            = [aws_subnet.public[0].id, aws_subnet.public[1].id] # Use different AZs
 }
 
 resource "aws_alb_target_group" "ecs_tg" {
@@ -278,7 +285,7 @@ resource "aws_launch_template" "ecs_lt" {
   user_data = base64encode(<<EOF
 #!/bin/bash
 echo ECS_CLUSTER=${aws_ecs_cluster.ecs_cluster.name} >> /etc/ecs/ecs.config
-systemctl enable --now ecs
+
 EOF
   )
   lifecycle {
@@ -288,9 +295,9 @@ EOF
 
 resource "aws_autoscaling_group" "ecs_asg" {
   min_size            = 1
-  max_size            = 3
-  desired_capacity    = 2
-  vpc_zone_identifier = aws_subnet.private[*].id
+  max_size            = 4
+  desired_capacity    = 3
+  vpc_zone_identifier = slice(aws_subnet.private[*].id, 0, 3)
   launch_template {
     id      = aws_launch_template.ecs_lt.id
     version = "$Latest"
@@ -302,7 +309,7 @@ resource "aws_autoscaling_group" "ecs_asg" {
     propagate_at_launch = true
   }
 
-  depends_on = [aws_ecs_cluster.ecs_cluster, aws_launch_template.ecs_lt] # to follow correct order
+  depends_on = [aws_ecs_cluster.ecs_cluster, aws_launch_template.ecs_lt, aws_nat_gateway.nat] # to follow correct order
 }
 
 
@@ -344,4 +351,55 @@ resource "aws_iam_role_policy_attachment" "ecs_instance_policy" {
 resource "aws_iam_instance_profile" "ecs_instance_profile" {
   name = "ecs-instance-profile"
   role = aws_iam_role.ecs_instance_role.name
+}
+
+
+# RDS PostgreSQL Instance
+resource "aws_db_instance" "postgresql" {
+  allocated_storage      = 20
+  storage_type           = "gp2"
+  engine                 = "postgres"
+  engine_version         = "17.3"
+  instance_class         = "db.t3.micro"
+  db_name                = "bgene_db"
+  username               = "dbadminn"
+  password               = data.aws_ssm_parameter.db_password.value # Retrieve password from Parameter Store
+  parameter_group_name   = "default.postgres17"
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+  db_subnet_group_name   = aws_db_subnet_group.rds_subnet_group.name
+  multi_az               = false
+  skip_final_snapshot    = true
+}
+
+# RDS Subnet Group
+resource "aws_db_subnet_group" "rds_subnet_group" {
+  name       = "rds-subnet-group"
+  subnet_ids = [aws_subnet.private[3].id, aws_subnet.private[4].id] # Use the 4th private subnet for RDS
+  tags = {
+    Name = "rds-subnet-group"
+  }
+}
+# Data Source to Fetch DB Password from Parameter Store
+data "aws_ssm_parameter" "db_password" {
+  name = "/bgene/prod/db_password" # Replace with your parameter name
+}
+
+
+resource "aws_ecs_capacity_provider" "ecs_cp" {
+  name = "bgene-capacity-provider"
+
+  auto_scaling_group_provider {
+    auto_scaling_group_arn         = aws_autoscaling_group.ecs_asg.arn
+    managed_termination_protection = "DISABLED"
+
+    managed_scaling {
+      status          = "ENABLED"
+      target_capacity = 100
+    }
+  }
+}
+
+resource "aws_ecs_cluster_capacity_providers" "ecs_cp_attach" {
+  cluster_name       = aws_ecs_cluster.ecs_cluster.name
+  capacity_providers = [aws_ecs_capacity_provider.ecs_cp.name]
 }
