@@ -24,4 +24,6 @@ This setup creates an ECS cluster with three EC2 instances, each hosted in diffe
 Code also deploys EC2 bastion host on public subnet which can be used for troubleshooting purposes and access to private EC2 instances. 
 
 
+Outputs will give the public ip of Bastion host, database endpoint url and dns name of application load balancer. 
+
 
