@@ -64,7 +64,7 @@ resource "aws_ecs_service" "ecs_service" {
     container_port   = 80
   }
 
-  depends_on = [aws_alb_listener.http, aws_autoscaling_group.ecs_asg, aws_nat_gateway.nat] # Add depends_on
+  depends_on = [aws_alb_listener.http, aws_autoscaling_group.ecs_asg, aws_nat_gateway.nat]
 }
 
 
